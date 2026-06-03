@@ -1,0 +1,39 @@
+services:
+  app:
+    build: ./app
+    container_name: app_web_php
+    ports:
+      - "8080:80"
+    volumes:
+      - ./app:/var/www/html
+    networks:
+      - red_app
+    depends_on:
+      - db
+    environment:
+      DB_HOST: db
+      DB_NAME: crud_db
+      DB_USER: usuario_web
+      DB_PASSWORD: password_seguro
+
+  db:
+    image: mariadb:11
+    container_name: app_db_mariadb
+    restart: always
+    environment:
+      MARIADB_ROOT_PASSWORD: root_password
+      MARIADB_DATABASE: crud_db
+      MARIADB_USER: usuario_web
+      MARIADB_PASSWORD: password_seguro
+    volumes:
+      - db_data:/var/lib/mysql
+      - ./db/init.sql:/docker-entrypoint-initdb.d/init.sql
+    networks:
+      - red_app
+
+networks:
+  red_app:
+    driver: bridge
+
+volumes:
+  db_data:
