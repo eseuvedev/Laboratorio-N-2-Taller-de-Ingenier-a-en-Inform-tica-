@@ -1,5 +1,12 @@
 <?php
+// Evita que errores de MySQL boten toda la página
 mysqli_report(MYSQLI_REPORT_OFF);
+
+// Opcional para diagnóstico durante desarrollo.
+// Si después quieres ocultar errores, cambia display_errors a 0.
+ini_set('display_errors', 1);
+ini_set('display_startup_errors', 1);
+error_reporting(E_ALL);
 
 $host = getenv('DB_HOST') ?: 'db';
 $dbname = getenv('DB_NAME') ?: 'crud_db';
@@ -9,108 +16,180 @@ $password = getenv('DB_PASSWORD') ?: 'password_seguro';
 $conn = null;
 $dbDisponible = false;
 $errorConexion = "";
-
-/*
-    Intentamos conectar varias veces porque, al levantar Docker Compose,
-    a veces PHP inicia antes que MariaDB y aparece "Connection refused".
-*/
-for ($intento = 1; $intento <= 5; $intento++) {
-    $conn = @new mysqli($host, $user, $password, $dbname);
-
-    if (!$conn->connect_error) {
-        $dbDisponible = true;
-        break;
-    }
-
-    $errorConexion = $conn->connect_error;
-    sleep(2);
-}
-
 $mensaje = "";
 $productoEditar = null;
 $resultado = null;
+
+/*
+    En Codespaces, si ejecutas solo:
+    php -S 0.0.0.0:8080 -t .
+    probablemente NO tendrás MariaDB funcionando.
+
+    Además, si PHP no tiene la extensión mysqli instalada,
+    antes el sitio podía caer con error 500.
+*/
+if (!class_exists('mysqli')) {
+    $errorConexion = "La extensión mysqli de PHP no está instalada o no está habilitada. Instala php-mysqli o ejecuta el proyecto con Docker.";
+} else {
+    /*
+        Intentamos conectar varias veces porque, al levantar Docker Compose,
+        a veces PHP inicia antes que MariaDB y aparece 'Connection refused'.
+    */
+    for ($intento = 1; $intento <= 5; $intento++) {
+        $conn = @new mysqli($host, $user, $password, $dbname);
+
+        if ($conn && !$conn->connect_error) {
+            $dbDisponible = true;
+            break;
+        }
+
+        if ($conn && $conn->connect_error) {
+            $errorConexion = $conn->connect_error;
+        } else {
+            $errorConexion = "No fue posible crear la conexión con MariaDB.";
+        }
+
+        sleep(1);
+    }
+}
 
 if ($dbDisponible) {
     $conn->set_charset("utf8mb4");
 
     /*
         Crea la tabla si no existe.
-        Esto ayuda si el volumen de la base de datos se reinicia o si init.sql no se ejecutó.
+        Esto ayuda si el volumen de la base de datos se reinicia
+        o si init.sql no se ejecutó.
     */
-    $conn->query("
+    $crearTabla = $conn->query("
         CREATE TABLE IF NOT EXISTS productos (
             id INT AUTO_INCREMENT PRIMARY KEY,
             nombre VARCHAR(100) NOT NULL,
             descripcion TEXT,
-            precio DECIMAL(10,2) NOT NULL CHECK (precio >= 0),
+            precio DECIMAL(10,2) NOT NULL,
             fecha_creacion TIMESTAMP DEFAULT CURRENT_TIMESTAMP
         )
     ");
 
-    if (isset($_POST['crear'])) {
-        $nombre = trim($_POST['nombre']);
-        $descripcion = trim($_POST['descripcion']);
-        $precio = $_POST['precio'];
+    if (!$crearTabla) {
+        $mensaje = "Error al crear o verificar la tabla productos: " . $conn->error;
+    }
 
-        if ($precio < 0) {
+    if (isset($_POST['crear'])) {
+        $nombre = trim($_POST['nombre'] ?? '');
+        $descripcion = trim($_POST['descripcion'] ?? '');
+        $precio = isset($_POST['precio']) ? floatval($_POST['precio']) : -1;
+
+        if ($nombre === '') {
+            $mensaje = "Error: el nombre del producto es obligatorio.";
+        } elseif ($descripcion === '') {
+            $mensaje = "Error: la descripción es obligatoria.";
+        } elseif ($precio < 0) {
             $mensaje = "Error: el precio no puede ser negativo.";
         } else {
             $stmt = $conn->prepare("INSERT INTO productos (nombre, descripcion, precio) VALUES (?, ?, ?)");
-            $stmt->bind_param("ssd", $nombre, $descripcion, $precio);
 
-            if ($stmt->execute()) {
-                $mensaje = "Producto creado correctamente.";
+            if ($stmt) {
+                $stmt->bind_param("ssd", $nombre, $descripcion, $precio);
+
+                if ($stmt->execute()) {
+                    $mensaje = "Producto creado correctamente.";
+                } else {
+                    $mensaje = "Error al crear el producto: " . $stmt->error;
+                }
+
+                $stmt->close();
             } else {
-                $mensaje = "Error al crear el producto.";
+                $mensaje = "Error al preparar la consulta de creación: " . $conn->error;
             }
         }
     }
 
     if (isset($_POST['actualizar'])) {
-        $id = $_POST['id'];
-        $nombre = trim($_POST['nombre']);
-        $descripcion = trim($_POST['descripcion']);
-        $precio = $_POST['precio'];
+        $id = isset($_POST['id']) ? intval($_POST['id']) : 0;
+        $nombre = trim($_POST['nombre'] ?? '');
+        $descripcion = trim($_POST['descripcion'] ?? '');
+        $precio = isset($_POST['precio']) ? floatval($_POST['precio']) : -1;
 
-        if ($precio < 0) {
+        if ($id <= 0) {
+            $mensaje = "Error: ID de producto inválido.";
+        } elseif ($nombre === '') {
+            $mensaje = "Error: el nombre del producto es obligatorio.";
+        } elseif ($descripcion === '') {
+            $mensaje = "Error: la descripción es obligatoria.";
+        } elseif ($precio < 0) {
             $mensaje = "Error: el precio no puede ser negativo.";
         } else {
             $stmt = $conn->prepare("UPDATE productos SET nombre = ?, descripcion = ?, precio = ? WHERE id = ?");
-            $stmt->bind_param("ssdi", $nombre, $descripcion, $precio, $id);
 
-            if ($stmt->execute()) {
-                $mensaje = "Producto actualizado correctamente.";
+            if ($stmt) {
+                $stmt->bind_param("ssdi", $nombre, $descripcion, $precio, $id);
+
+                if ($stmt->execute()) {
+                    $mensaje = "Producto actualizado correctamente.";
+                } else {
+                    $mensaje = "Error al actualizar el producto: " . $stmt->error;
+                }
+
+                $stmt->close();
             } else {
-                $mensaje = "Error al actualizar el producto.";
+                $mensaje = "Error al preparar la consulta de actualización: " . $conn->error;
             }
         }
     }
 
     if (isset($_GET['eliminar'])) {
-        $id = $_GET['eliminar'];
+        $id = intval($_GET['eliminar']);
 
-        $stmt = $conn->prepare("DELETE FROM productos WHERE id = ?");
-        $stmt->bind_param("i", $id);
+        if ($id > 0) {
+            $stmt = $conn->prepare("DELETE FROM productos WHERE id = ?");
 
-        if ($stmt->execute()) {
-            $mensaje = "Producto eliminado correctamente.";
+            if ($stmt) {
+                $stmt->bind_param("i", $id);
+
+                if ($stmt->execute()) {
+                    $mensaje = "Producto eliminado correctamente.";
+                } else {
+                    $mensaje = "Error al eliminar el producto: " . $stmt->error;
+                }
+
+                $stmt->close();
+            } else {
+                $mensaje = "Error al preparar la consulta de eliminación: " . $conn->error;
+            }
         } else {
-            $mensaje = "Error al eliminar el producto.";
+            $mensaje = "Error: ID inválido para eliminar.";
         }
     }
 
     if (isset($_GET['editar'])) {
-        $id = $_GET['editar'];
+        $id = intval($_GET['editar']);
 
-        $stmt = $conn->prepare("SELECT * FROM productos WHERE id = ?");
-        $stmt->bind_param("i", $id);
-        $stmt->execute();
+        if ($id > 0) {
+            $stmt = $conn->prepare("SELECT id, nombre, descripcion, precio, fecha_creacion FROM productos WHERE id = ?");
 
-        $resultadoEditar = $stmt->get_result();
-        $productoEditar = $resultadoEditar->fetch_assoc();
+            if ($stmt) {
+                $stmt->bind_param("i", $id);
+                $stmt->execute();
+
+                $resultadoEditar = $stmt->get_result();
+
+                if ($resultadoEditar) {
+                    $productoEditar = $resultadoEditar->fetch_assoc();
+                }
+
+                $stmt->close();
+            } else {
+                $mensaje = "Error al preparar la consulta de edición: " . $conn->error;
+            }
+        }
     }
 
-    $resultado = $conn->query("SELECT * FROM productos ORDER BY id DESC");
+    $resultado = $conn->query("SELECT id, nombre, descripcion, precio, fecha_creacion FROM productos ORDER BY id DESC");
+
+    if (!$resultado) {
+        $mensaje = "Error al obtener productos: " . $conn->error;
+    }
 }
 ?>
 
@@ -257,6 +336,7 @@ if ($dbDisponible) {
             border-radius: 5px;
             color: #991b1b;
             font-weight: bold;
+            line-height: 1.5;
         }
 
         .acciones a {
@@ -309,6 +389,15 @@ if ($dbDisponible) {
         .mockup p {
             color: #4b5563;
         }
+
+        .nota {
+            background: #fff7ed;
+            border: 1px solid #fed7aa;
+            padding: 12px;
+            border-radius: 8px;
+            color: #9a3412;
+            margin-bottom: 20px;
+        }
     </style>
 </head>
 <body>
@@ -347,7 +436,15 @@ if ($dbDisponible) {
             A continuación, se presenta un mockup visual de la aplicación web desarrollada,
             utilizado como referencia para representar la interfaz principal del sistema CRUD.
         </p>
-        <img src="mockupIndex.jpeg" alt="Mockup de la aplicación CRUD">
+
+        <?php if (file_exists("mockupIndex.jpeg")): ?>
+            <img src="mockupIndex.jpeg" alt="Mockup de la aplicación CRUD">
+        <?php else: ?>
+            <div class="nota">
+                No se encontró la imagen <strong>mockupIndex.jpeg</strong> en la carpeta actual.
+                La página puede funcionar igual, pero debes subir esa imagen dentro de la carpeta <strong>app</strong> si quieres mostrar el mockup.
+            </div>
+        <?php endif; ?>
     </section>
 
     <section class="crud-info">
@@ -362,14 +459,17 @@ if ($dbDisponible) {
 
     <?php if (!$dbDisponible): ?>
         <div class="error">
-            No se pudo conectar con la base de datos MariaDB.
-            Verifica que el contenedor app_db_mariadb esté en ejecución.
-            Detalle técnico: <?php echo htmlspecialchars($errorConexion); ?>
+            <strong>No se pudo conectar con la base de datos MariaDB.</strong><br>
+            Esto puede pasar si estás ejecutando solo PHP con <code>php -S</code>, sin levantar MariaDB con Docker Compose.<br><br>
+            <strong>Host configurado:</strong> <?php echo htmlspecialchars($host); ?><br>
+            <strong>Base de datos:</strong> <?php echo htmlspecialchars($dbname); ?><br>
+            <strong>Usuario:</strong> <?php echo htmlspecialchars($user); ?><br>
+            <strong>Detalle técnico:</strong> <?php echo htmlspecialchars($errorConexion); ?>
         </div>
     <?php endif; ?>
 
     <?php if ($mensaje): ?>
-        <div class="mensaje">
+        <div class="<?php echo stripos($mensaje, 'error') !== false ? 'error' : 'mensaje'; ?>">
             <?php echo htmlspecialchars($mensaje); ?>
         </div>
     <?php endif; ?>
@@ -381,7 +481,7 @@ if ($dbDisponible) {
 
             <form method="POST">
                 <?php if ($productoEditar): ?>
-                    <input type="hidden" name="id" value="<?php echo $productoEditar['id']; ?>">
+                    <input type="hidden" name="id" value="<?php echo htmlspecialchars($productoEditar['id']); ?>">
                 <?php endif; ?>
 
                 <label>Nombre del producto:</label>
@@ -422,14 +522,14 @@ if ($dbDisponible) {
                     <?php if ($resultado && $resultado->num_rows > 0): ?>
                         <?php while ($producto = $resultado->fetch_assoc()): ?>
                             <tr>
-                                <td><?php echo $producto['id']; ?></td>
+                                <td><?php echo htmlspecialchars($producto['id']); ?></td>
                                 <td><?php echo htmlspecialchars($producto['nombre']); ?></td>
                                 <td><?php echo htmlspecialchars($producto['descripcion']); ?></td>
-                                <td>$<?php echo number_format($producto['precio'], 0, ',', '.'); ?></td>
-                                <td><?php echo $producto['fecha_creacion']; ?></td>
+                                <td>$<?php echo number_format((float)$producto['precio'], 0, ',', '.'); ?></td>
+                                <td><?php echo htmlspecialchars($producto['fecha_creacion']); ?></td>
                                 <td class="acciones">
-                                    <a class="editar" href="index.php?editar=<?php echo $producto['id']; ?>#crear">Editar</a>
-                                    <a class="eliminar" href="index.php?eliminar=<?php echo $producto['id']; ?>"
+                                    <a class="editar" href="index.php?editar=<?php echo htmlspecialchars($producto['id']); ?>#crear">Editar</a>
+                                    <a class="eliminar" href="index.php?eliminar=<?php echo htmlspecialchars($producto['id']); ?>"
                                        onclick="return confirm('¿Seguro que deseas eliminar este producto?');">
                                        Eliminar
                                     </a>
@@ -443,6 +543,16 @@ if ($dbDisponible) {
                     <?php endif; ?>
                 </tbody>
             </table>
+        </section>
+
+    <?php else: ?>
+
+        <section id="crear">
+            <h2>CRUD no disponible temporalmente</h2>
+            <div class="nota">
+                La página principal ya carga correctamente, pero las funciones de crear, leer, modificar y borrar productos
+                requieren conexión a MariaDB.
+            </div>
         </section>
 
     <?php endif; ?>
